@@ -99,6 +99,11 @@ enum {
 
 void linenoiseSetMouseSupport(int enable);
 int linenoiseGetLastMouse(int *x, int *y, int *button, int *event_type);
+
+/* Non-blocking / Multiplexing API */
+void linenoiseSetTimeout(int ms);
+void linenoiseRefresh(void);
+
 #endif
 
 /*

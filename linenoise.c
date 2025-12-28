@@ -163,24 +163,6 @@ static int history_len = 0;
 static int history_index = 0;
 static char **history = NULL;
 
-static int mouse_support = 0;
-static int mouse_x = 0;
-static int mouse_y = 0;
-static int mouse_button = 0;
-static int mouse_event_type = 0; /* 'M' for press, 'm' for release */
-
-void linenoiseSetMouseSupport(int enable) {
-    mouse_support = enable;
-}
-
-int linenoiseGetLastMouse(int *x, int *y, int *button, int *event_type) {
-    if (x) *x = mouse_x;
-    if (y) *y = mouse_y;
-    if (button) *button = mouse_button;
-    if (event_type) *event_type = mouse_event_type;
-    return 1;
-}
-
 /* Structure to contain the status of the current (being edited) line */
 struct current {
     stringbuf *buf; /* Current buffer. Always null terminated */
@@ -210,6 +192,34 @@ struct current {
 #endif
 #endif
 };
+
+static int mouse_support = 0;
+static int mouse_x = 0;
+static int mouse_y = 0;
+static int mouse_button = 0;
+static int mouse_event_type = 0; /* 'M' for press, 'm' for release */
+
+static int input_timeout_ms = -1; /* -1 = block forever */
+static struct current *active_current = NULL; /* For external refresh */
+static struct current saved_state = {0};      /* For persistence */
+static int state_is_saved = 0;
+
+void linenoiseSetMouseSupport(int enable) {
+    mouse_support = enable;
+}
+
+void linenoiseSetTimeout(int ms) {
+    input_timeout_ms = ms;
+}
+
+int linenoiseGetLastMouse(int *x, int *y, int *button, int *event_type) {
+    if (x) *x = mouse_x;
+    if (y) *y = mouse_y;
+    if (button) *button = mouse_button;
+    if (event_type) *event_type = mouse_event_type;
+    return 1;
+}
+
 
 static int fd_read(struct current *current);
 static int getWindowSize(struct current *current);
@@ -548,6 +558,10 @@ static int fd_read_char(struct current *current, int timeout)
     struct pollfd p;
     unsigned char c;
 
+    if (timeout == -1 && input_timeout_ms >= 0) {
+        timeout = input_timeout_ms;
+    }
+
     if (current->pending) {
         c = current->pending;
         current->pending = 0;
@@ -559,7 +573,7 @@ static int fd_read_char(struct current *current, int timeout)
 
     if (poll(&p, 1, timeout) == 0) {
         /* timeout */
-        return -1;
+        return -2;
     }
     if (read(current->fd, &c, 1) != 1) {
         return -1;
@@ -583,8 +597,10 @@ static int fd_read(struct current *current)
         buf[0] = current->pending;
         current->pending = 0;
     }
-    else if (read(current->fd, &buf[0], 1) != 1) {
-        return -1;
+    else {
+        int c = fd_read_char(current, -1);
+        if (c < 0) return c;
+        buf[0] = c;
     }
     n = utf8_charlen(buf[0]);
     if (n < 1) {
@@ -1689,8 +1705,9 @@ static int reverseIncrementalSearch(struct current *current)
 }
 
 static int linenoiseEdit(struct current *current) {
-    history_index = 0;
+    /* history_index must be initialized by caller */
 
+    active_current = current; /* Allow external refresh */
     refreshLine(current);
 
     while(1) {
@@ -1723,7 +1740,14 @@ static int linenoiseEdit(struct current *current) {
 #endif
         if (c == -1) {
             /* Return on errors */
+            active_current = NULL;
             return sb_len(current->buf);
+        }
+        if (c == -2) {
+            /* Timeout */
+            errno = EAGAIN;
+            active_current = NULL;
+            return -2;
         }
 
         switch(c) {
@@ -1978,7 +2002,13 @@ char *linenoiseWithInitial(const char *prompt, const char *initial)
     struct current current;
     stringbuf *sb;
 
-    memset(&current, 0, sizeof(current));
+    if (state_is_saved) {
+        current = saved_state;
+        current.prompt = prompt; /* Update prompt in case it changed */
+    } else {
+        memset(&current, 0, sizeof(current));
+        history_index = 0;
+    }
 
     if (enableRawMode(&current) == -1) {
         printf("%s", prompt);
@@ -1990,19 +2020,30 @@ char *linenoiseWithInitial(const char *prompt, const char *initial)
         }
     }
     else {
-        current.buf = sb_alloc();
-        current.pos = 0;
-        current.nrows = 1;
-        current.prompt = prompt;
+        if (!state_is_saved) {
+            current.buf = sb_alloc();
+            current.pos = 0;
+            current.nrows = 1;
+            current.prompt = prompt;
 
-        /* The latest history entry is always our current buffer */
-        linenoiseHistoryAdd(initial);
-        set_current(&current, initial);
+            /* The latest history entry is always our current buffer */
+            linenoiseHistoryAdd(initial);
+            set_current(&current, initial);
+        }
 
         count = linenoiseEdit(&current);
 
         disableRawMode(&current);
+        
+        if (count == -2) {
+            /* Timeout - save state */
+            saved_state = current;
+            state_is_saved = 1;
+            return NULL; /* errno is set to EAGAIN by linenoiseEdit */
+        }
+
         printf("\n");
+        state_is_saved = 0;
 
         sb_free(current.capture);
         if (count == -1) {
@@ -2078,6 +2119,12 @@ int linenoiseHistorySetMaxLen(int len) {
     if (history_len > history_max_len)
         history_len = history_max_len;
     return 1;
+}
+
+void linenoiseRefresh(void) {
+    if (active_current) {
+        refreshLine(active_current);
+    }
 }
 
 /* Save the history in the specified file. On success 0 is returned
