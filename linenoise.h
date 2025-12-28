@@ -69,6 +69,36 @@ typedef void(linenoiseFreeHintsCallback)(void *hint, void *userdata);
 void linenoiseSetHintsCallback(linenoiseHintsCallback *callback, void *userdata);
 void linenoiseSetFreeHintsCallback(linenoiseFreeHintsCallback *callback);
 
+/*
+ * Callback for trapping key presses.
+ * Returns 1 if the key was handled and should be ignored by linenoise, 0 otherwise.
+ */
+typedef int (linenoiseKeyCallback)(int key, void *userdata);
+void linenoiseSetKeyCallback(linenoiseKeyCallback *callback, void *userdata);
+
+/* Use -ve numbers here to co-exist with normal unicode chars */
+enum {
+    SPECIAL_NONE = 0,
+    /* don't use -1 here since that indicates error */
+    SPECIAL_UP = -20,
+    SPECIAL_DOWN = -21,
+    SPECIAL_LEFT = -22,
+    SPECIAL_RIGHT = -23,
+    SPECIAL_DELETE = -24,
+    SPECIAL_HOME = -25,
+    SPECIAL_END = -26,
+    SPECIAL_INSERT = -27,
+    SPECIAL_PAGE_UP = -28,
+    SPECIAL_PAGE_DOWN = -29,
+    SPECIAL_MOUSE = -30,
+
+    /* Some handy names for other special keycodes */
+    CHAR_ESCAPE = 27,
+    CHAR_DELETE = 127,
+};
+
+void linenoiseSetMouseSupport(int enable);
+int linenoiseGetLastMouse(int *x, int *y, int *button, int *event_type);
 #endif
 
 /*

@@ -158,30 +158,28 @@
 /* meta('a') ->  0xe1 */
 #define meta(C) ((C) | 0x80)
 
-/* Use -ve numbers here to co-exist with normal unicode chars */
-enum {
-    SPECIAL_NONE,
-    /* don't use -1 here since that indicates error */
-    SPECIAL_UP = -20,
-    SPECIAL_DOWN = -21,
-    SPECIAL_LEFT = -22,
-    SPECIAL_RIGHT = -23,
-    SPECIAL_DELETE = -24,
-    SPECIAL_HOME = -25,
-    SPECIAL_END = -26,
-    SPECIAL_INSERT = -27,
-    SPECIAL_PAGE_UP = -28,
-    SPECIAL_PAGE_DOWN = -29,
-
-    /* Some handy names for other special keycodes */
-    CHAR_ESCAPE = 27,
-    CHAR_DELETE = 127,
-};
-
 static int history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN;
 static int history_len = 0;
 static int history_index = 0;
 static char **history = NULL;
+
+static int mouse_support = 0;
+static int mouse_x = 0;
+static int mouse_y = 0;
+static int mouse_button = 0;
+static int mouse_event_type = 0; /* 'M' for press, 'm' for release */
+
+void linenoiseSetMouseSupport(int enable) {
+    mouse_support = enable;
+}
+
+int linenoiseGetLastMouse(int *x, int *y, int *button, int *event_type) {
+    if (x) *x = mouse_x;
+    if (y) *y = mouse_y;
+    if (button) *button = mouse_button;
+    if (event_type) *event_type = mouse_event_type;
+    return 1;
+}
 
 /* Structure to contain the status of the current (being edited) line */
 struct current {
@@ -751,6 +749,36 @@ static int check_special(struct current *current)
                 return SPECIAL_HOME;
         }
     }
+    if (mouse_support && c == '[' && c2 == '<') {
+        /* Mouse sequence: \e[<Pb;Px;PyM (or m) */
+        int params[3] = {0, 0, 0};
+        int p_idx = 0;
+        int ch;
+
+        /* Parse params separated by ';' */
+        while (1) {
+            ch = fd_read_char(current, 50);
+            if (ch < 0) return SPECIAL_NONE; /* Broken sequence */
+
+            if (ch >= '0' && ch <= '9') {
+                params[p_idx] = params[p_idx] * 10 + (ch - '0');
+            } else if (ch == ';') {
+                p_idx++;
+                if (p_idx > 2) break; /* Too many params */
+            } else if (ch == 'M' || ch == 'm') {
+                /* End of sequence */
+                mouse_button = params[0];
+                mouse_x = params[1];
+                mouse_y = params[2];
+                mouse_event_type = ch;
+                return SPECIAL_MOUSE;
+            } else {
+                /* Invalid char */
+                break;
+            }
+        }
+        return SPECIAL_NONE;
+    }
     if (c == '[' && c2 >= '1' && c2 <= '8') {
         /* extended escape */
         c = fd_read_char(current, 50);
@@ -836,6 +864,8 @@ static int char_display_width(int ch)
 #ifndef NO_COMPLETION
 static linenoiseCompletionCallback *completionCallback = NULL;
 static void *completionUserdata = NULL;
+static linenoiseKeyCallback *keyCallback = NULL;
+static void *keyUserdata = NULL;
 static int showhints = 1;
 static linenoiseHintsCallback *hintsCallback = NULL;
 static linenoiseFreeHintsCallback *freeHintsCallback = NULL;
@@ -914,6 +944,11 @@ linenoiseCompletionCallback * linenoiseSetCompletionCallback(linenoiseCompletion
     completionCallback = fn;
     completionUserdata = userdata;
     return old;
+}
+
+void linenoiseSetKeyCallback(linenoiseKeyCallback *fn, void *userdata) {
+    keyCallback = fn;
+    keyUserdata = userdata;
 }
 
 void linenoiseAddCompletion(linenoiseCompletions *lc, const char *str) {
@@ -1669,6 +1704,12 @@ static int linenoiseEdit(struct current *current) {
             c = completeLine(current);
         }
 #endif
+        if (keyCallback != NULL) {
+            if (keyCallback(c, keyUserdata)) {
+                continue;
+            }
+        }
+
         if (c == ctrl('R')) {
             /* reverse incremental search will provide an alternative keycode or 0 for none */
             c = reverseIncrementalSearch(current);
@@ -1687,6 +1728,16 @@ static int linenoiseEdit(struct current *current) {
 
         switch(c) {
         case SPECIAL_NONE:
+            break;
+        case SPECIAL_MOUSE:
+            /* Mouse event logic */
+            if (keyCallback && keyCallback(c, keyUserdata)) {
+                continue;
+            }
+            if (mouse_support == 2) {
+                /* Return current buffer to allow app to handle event */
+                 return sb_len(current->buf);
+            }
             break;
         case '\r':    /* enter/CR */
         case '\n':    /* LF */
